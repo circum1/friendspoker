@@ -7,10 +7,10 @@ class TestPoker < Test::Unit::TestCase
 
   def test_card_fromstring
     tcs = [
-      ["C10", "C", 10],
-      ["DA", "D", 1],
-      ["HJ", "H", 11],
-      ["S2", "S", 2],
+      ["C10", :C, 10],
+      ["DA", :D, 1],
+      ["HJ", :H, 11],
+      ["S2", :S, 2],
     ]
     tcs.each { |s, col, num|
       c = Card.fromString(s)

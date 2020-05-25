@@ -1,4 +1,14 @@
+require "json"
 require "logger"
+
+class InvalidActionError < StandardError
+end
+
+module JsonHelper
+  def attr2hash(*names)
+    Hash[names.map { |n| [n.to_sym, self.send(n)] }]
+  end
+end
 
 class MyLog
   def self.log
@@ -13,13 +23,375 @@ end
 
 $log = MyLog.log
 
-class EventMgr
+class PokerEvent
+  attr_accessor :table, :evt
+  def initialize(table, payload)
+    @table = table
+    @evt = {
+      timestamp: Time.now,
+      type: self.class.name,
+      event: payload,
+    }
+  end
+
+  def to_s
+    "#{@evt[:type]}:#{@evt[:timestamp].strftime("%k:%M:%S")}:#{@evt[:event]}"
+  end
 end
 
-class PokerGame
+class HeartbeatEvent < PokerEvent; end
+class WhosNextEvent < PokerEvent; end
+class GameStateEvent < PokerEvent; end
+
+# PlayerActionEvent = Struct.new(:player, :action, :amount)
+# end
+
+# GameUpdatedEvent
+
+# singleton? module? class methods?
+module EventMgr
+  def self.notify(event)
+    $log.debug("EventMgr#notify(#{event})")
+  end
 end
 
 class Lobby
+end
+
+class PlayerInGame
+  include JsonHelper
+
+  attr_reader :player, :last_action, :money_in_round, :cards, :folded
+
+  # player is Table::PlayerAtTable object
+  def initialize(player, game, cards, blind=0)
+    @player = player
+    @game = game
+    nextRound
+    # TODO check money
+    add_to_pot(blind)
+    @cards = cards
+    @folded = false
+  end
+
+  def add_to_pot(amount)
+    @player.subtract_money(amount)
+    @game.add_to_pot(amount)
+    @money_in_round += amount
+  end
+
+  def action(what, max_bet, raise_amount=0)
+    $log.debug("PIG#action(#{what}, #{max_bet}, #{raise_amount})")
+    raise InvalidActionError, "player #{player} already folded" if @folded
+    # for call
+    amount = max_bet - @money_in_round
+    case what
+    when :check
+      raise InvalidActionError, "Invalid check, need to call #{amount} bucks" if amount > 0
+    when :call, :raise
+      amount += raise_amount if what == :raise
+      # TODO check if we have enough money
+      add_to_pot(amount)
+    when :fold
+      @folded = true
+    else
+      raise InvalidActionError, "Unknown action #{:what}"
+    end
+    @last_action = what
+  end
+
+  def nextRound
+    @last_action = nil
+    @money_in_round = 0
+  end
+
+  # serializable state that is visible at the table from a player, in a form of hash
+  # cards not included
+  def get_state
+    attr2hash(:last_action, :money_in_round, :folded)
+      .merge(@player.get_state)
+  end
+
+  # serializable state visible only for the given player (i.e., cards)
+  def get_private_state
+    res = {cards: cards}
+    res[:rank] = Hand.new(cards + @game.community_cards).rank.ranking if @game.round > 0
+    res
+  end
+
+  # cards not included
+  def to_json
+    JSON.generate(get_state)
+  end
+
+end
+
+
+# A single (ongoing) game at a table
+class Game
+  include JsonHelper
+
+  attr_reader :deck
+
+  # index of player with dealing button
+  attr_reader :button
+
+  # array of PlayerInGame objects
+  attr_reader :pigs
+
+  # 0..3: preflop, flop, turn, river
+  attr_reader :round
+
+  # index of the last player who raised, the one before that can speak last time
+  attr_reader :last_raiser
+
+  # index of next player (who needs to action), deadline for the action
+  attr_reader :waiting_for, :deadline
+
+  attr_reader :community_cards
+
+  # serializable, public state of the table (can be sent to clients)
+  # cards in players' hands not included
+  def get_state
+    h = attr2hash(:button, :round, :last_raiser, :waiting_for, :deadline, :community_cards)
+    h[:pigs] = pigs.map {|p| p.get_state}
+    h[:finished] = @finished
+    return h
+  end
+
+  # button is index in the table.players array
+  # timeout is the number of seconds allowed for action
+  def initialize(table, button, timeout)
+    @table = table
+    @button = button
+    @timeout = timeout
+    @deck = Deck.new
+    @money_in_pot = 0
+    @pigs = @table.players.map.with_index { |p, ind|
+      # TODO parameterize blind
+      blind = case ind
+        when (button + 1) % @table.players.size then 10
+        when (button + 2) % @table.players.size then 20
+        else 0
+        end
+      PlayerInGame.new(p, self, @deck.draw2, blind)
+    }
+    @round = 0
+    @waiting_for = (button + 3) % @pigs.size
+    @deadline = Time.now + @timeout
+    # the player after big blind, even if she folds...
+    @last_raiser = @waiting_for
+    @community_cards = []
+    @finished = false
+  end
+
+  def add_to_pot(amount)
+    @money_in_pot += amount
+  end
+
+  def act_pig
+    @pigs[@waiting_for]
+  end
+
+  def valid_actions_for_next
+    res = [:fold]
+    res << :raise if act_pig.player.money > 0
+    if @pigs.map(&:money_in_round).max <= act_pig.money_in_round
+      res << :check
+    else
+      res << :call
+    end
+  end
+
+
+  def action(what, who, raise_amount = 0)
+    raise InvalidActionError, "Game has finished" if finished?
+    raise InvalidActionError,
+      "Action from player #{who} but it's #{act_pig.player}'s turn'" if act_pig.player != who
+
+    maxbet = @pigs.map(&:money_in_round).max
+    act_pig.action(what, maxbet, raise_amount)
+    @last_raiser = @waiting_for if what == :raise
+
+    still_playing = @pigs.select { |p| p.folded == false }
+    whos_next(still_playing)
+
+    if finished?
+      if still_playing.size == 1
+        winners = [still_playing[0].player]
+      else
+        winner = nil
+        hands = still_playing.map { |p| Hand.new(community_cards + p.cards) }
+        winnerhand = hands.max
+        winners = still_playing.select.with_index { |p, i| hands[i] == winnerhand }
+      end
+      $log.debug("The winner(s): #{winners}")
+      amount = @money_in_pot / winners.size
+      winners.each { |w| w.add_money(amount) }
+      winners[0].add_money(@money_in_pot - amount * winners.size)
+    end
+  end
+
+  def whos_next(still_playing)
+    raise "Internal error" if still_playing.size == 0
+    if still_playing.size == 1
+      @finished = true
+      return
+    end
+
+    loop {
+      @waiting_for = (@waiting_for + 1) % @pigs.size
+      break if @waiting_for == @last_raiser # end of round
+      break if !act_pig.folded
+      # TODO check for all-in
+    }
+
+    if @waiting_for == @last_raiser
+      @round += 1
+      case @round
+      when 1
+        deck.draw
+        3.times { @community_cards << deck.draw }
+      when 2, 3
+        deck.draw
+        @community_cards << deck.draw
+      else
+        @finished = true
+        return
+      end
+      @pigs.each(&:nextRound)
+      @waiting_for = (@button + 1) % @pigs.size
+      @last_raiser = @waiting_for
+    end
+    @deadline = Time.now + @timeout
+  end
+
+  def finished?
+    @finished
+  end
+
+end
+
+class Player
+  attr_reader :id, :nickname
+  attr_accessor :active
+  def initialize(id, nickname)
+    @id = id
+    @nickname = nickname
+    @active = true
+  end
+
+  def to_s
+    "#{nickname}"
+  end
+end
+
+# One poker table.
+class Table
+  # creator of the table, can start the game
+  attr_reader :owner
+
+  # array of players, order is important
+  # array of PlayerAtTable
+  attr_reader :players
+
+  # players want to join, but waiting until the ongoing game is finished
+  attr_reader :pending_players
+
+  # if nil, game not started
+  attr_reader :current_game
+
+  # PlayerAtTable = Struct.new(:player, :money, :starting_money)
+  # attr_reader :pats
+
+  attr_accessor :starting_money, :timeout
+
+  class PlayerAtTable < SimpleDelegator
+    include JsonHelper
+
+    attr_reader :starting_money, :money, :table
+    def initialize(player, starting_money, table)
+      super(player)
+      @starting_money = starting_money
+      @money = starting_money
+      @table = table
+    end
+
+    # at bet
+    def subtract_money(amount)
+      # TODO check <0
+      @money -= amount
+    end
+
+    def add_money(amount)
+      @money += amount
+    end
+
+    def ==(other)
+      self.id == other.id
+    end
+
+    def get_state
+      attr2hash(:starting_money, :money, :nickname)
+    end
+
+    def to_s
+      "#{nickname}(#{money})"
+    end
+
+    def inspect
+      "#<PAT: @nickname: #{nickname}, @money: #{money}>"
+    end
+  end
+
+
+  def initialize(owner)
+    # TODO parameterize
+    @starting_money = 1000
+    @timeout = 30
+
+    @owner = owner
+    @players = [PlayerAtTable.new(owner, @starting_money, self)]
+    @pending_players = []
+    @current_game = nil
+    @button = 0
+  end
+
+  def start_game
+    @players += @pending_players
+    @pending_players = []
+
+    # TODO check if no ongoing game
+    @current_game = Game.new(self, @button, @timeout)
+    @button = (@button + 1) % players.size
+
+    emit_events
+  end
+
+  def add_player(player)
+    @pending_players << PlayerAtTable.new(player, @starting_money, self)
+  end
+
+  def remove_player(player)
+    # TODO, may be complicated if in game
+  end
+
+  def action(what, who, raise_amount=0)
+    if current_game
+      # TODO check finished before and after...
+      current_game.action(what, who, raise_amount)
+      emit_events
+    end
+  end
+
+  def emit_events
+    EventMgr.notify(GameStateEvent.new(self, current_game.get_state))
+    EventMgr.notify(WhosNextEvent.new(self, {
+      player: current_game.act_pig.player,
+      actions: current_game.valid_actions_for_next
+    }))
+  end
+
 end
 
 # Representation of a card
@@ -31,8 +403,8 @@ class Card
   def initialize(color, number)
     # TODO check
     raise "Invalid card number #{number}" if !number.between?(1, 13)
-    color.upcase!
-    raise "Invalid card color #{color}" if !['C', 'D', 'H', 'S'].include?(color)
+    color = color.upcase.to_sym if !color.is_a?(Symbol)
+    raise "Invalid card color #{color}" if ![:C, :D, :H, :S].include?(color)
     # "C"lub, "D"iamond, "H"eart, "S"pade
     @color = color
     # 1-13 -- Ace is 1
@@ -70,6 +442,10 @@ class Card
     "#{color}#{n}"
   end
 
+  def inspect
+    to_s
+  end
+
   def <=>(other)
     my = number
     my = 14 if my == 1
@@ -79,6 +455,7 @@ class Card
   end
 end
 
+# can be deleted -- array has combination method :(
 def combination(arr, nselect)
   raise "nselect #{nselect} cannot be greater than arr.size #{arr.size}" if nselect > arr.size
   # indices
@@ -88,27 +465,18 @@ def combination(arr, nselect)
   # pos indexes is, valid between 0..nselect-1
   incrInd = proc { |pos|
     is[pos] += 1
-    (pos+1..nselect-1).each { |i|
-      is[i] = is[i-1] + 1
-    }
-    if is[-1] > maxind
-      if pos == 0
-        false
-      else
-        # overflow
-        incrInd.call(pos-1)
-      end
-    else
-      true
-    end
+    (pos+1..nselect-1).each { |i| is[i] = is[i-1] + 1 }
+    next true if is[-1] <= maxind
+    # we're done
+    next false if pos == 0
+    # overflow, increment the position before this one
+    incrInd.call(pos-1)
   }
 
-  while true do
+  loop {
     yield is.map { |i| arr[i] }
-    res = incrInd.call(nselect-1)
-    break if !res
-    # break if !incrInd.call(nselect-1)
-  end
+    break if !incrInd.call(nselect-1)
+  }
 end
 
 # A >=5-cards hand, mostly for ranking purposes
@@ -252,12 +620,27 @@ class Hand
 end
 
 class Deck
-  def initialize
-  end
-
-  def shuffle
+  def initialize(deck=nil)
+    if deck
+      @deck = deck
+      return
+    end
+    @deck = []
+    [:C, :D, :H, :S].each{ |c|
+      (1..13).each { |n|
+        @deck << Card.new(c, n)
+      }
+    }
+    @deck.shuffle!
   end
 
   def draw
+    raise "Deck::draw() when deck is empty!" if @deck.size == 0
+    @deck.pop
+  end
+
+  def draw2
+    raise "Deck::draw2() when deck is empty!" if @deck.size < 2
+    @deck.pop(2)
   end
 end
