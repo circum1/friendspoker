@@ -1,6 +1,7 @@
 source :rubygems
 gem 'sinatra', '>= 1.0'
 gem 'sinatra-contrib'
+gem 'thin'
 gem 'rake'
 gem 'data_mapper'
 gem 'dm-core'

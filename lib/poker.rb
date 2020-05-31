@@ -1,3 +1,4 @@
+require "eventmachine"
 require "json"
 require "logger"
 
@@ -24,9 +25,11 @@ end
 $log = MyLog.log
 
 class PokerEvent
-  attr_accessor :table, :evt
-  def initialize(table, payload)
-    @table = table
+  include JsonHelper
+
+  attr_accessor :channel, :evt, :id
+  def initialize(channel, payload)
+    @channel = channel
     @evt = {
       timestamp: Time.now,
       type: self.class.name,
@@ -35,23 +38,57 @@ class PokerEvent
   end
 
   def to_s
-    "#{@evt[:type]}:#{@evt[:timestamp].strftime("%k:%M:%S")}:#{@evt[:event]}"
+    "#{@evt[:type]}:#{@channel}:#{@evt[:timestamp].strftime("%k:%M:%S")}:#{@evt[:event]}"
+  end
+
+  def to_json(opts)
+    JSON.generate(attr2hash(:channel, :id, :evt), opts)
   end
 end
 
-class HeartbeatEvent < PokerEvent; end
 class WhosNextEvent < PokerEvent; end
 class GameStateEvent < PokerEvent; end
+class PlayerCardsEvent < PokerEvent; end
+class MessageEvent < PokerEvent; end
 
-# PlayerActionEvent = Struct.new(:player, :action, :amount)
-# end
-
-# GameUpdatedEvent
-
-# singleton? module? class methods?
 module EventMgr
+  @@next_id = 1
+  @@subscribers = []
+
+  # channel is arbitrary identifier -- using table names & user names
+  # sends out only event with id not lesser than smallest_id
+  def self.subscribe(channel, smallest_id, &block)
+    channel = [channel] if !channel.respond_to?(:each)
+    objs = []
+    channel.each { |c|
+      obj = {channel: c, smallest_id: smallest_id, block: block}
+      @@subscribers << obj
+      objs << obj
+    }
+    return proc {
+      objs.each { |o| unsubscribe(o) }
+    }
+  end
+
+  def self.unsubscribe(obj)
+    if @@subscribers.delete(obj)
+      $log.debug("Subscriber from channel #{obj[:channel]} deleted")
+    else
+      # $log.debug("Subscriber on channel #{obj[:channel]} could not be deleted")
+    end
+  end
+
   def self.notify(event)
+    event.id = @@next_id
+    @@next_id += 1
     $log.debug("EventMgr#notify(#{event})")
+
+    @@subscribers.select { |s|
+      s[:channel] == event.channel && s[:smallest_id] <= event.id
+    }.map { |s|
+      $log.debug("EventMgr#notify() sending to subscriber")
+      s[:block].call(event)
+    }
   end
 end
 
@@ -108,13 +145,12 @@ class PlayerInGame
   # serializable state that is visible at the table from a player, in a form of hash
   # cards not included
   def get_state
-    attr2hash(:last_action, :money_in_round, :folded)
-      .merge(@player.get_state)
+    @player.get_state.merge(attr2hash(:last_action, :money_in_round, :folded))
   end
 
   # serializable state visible only for the given player (i.e., cards)
   def get_private_state
-    res = {cards: cards}
+    res = {player: player.name, cards: cards}
     res[:rank] = Hand.new(cards + @game.community_cards).rank.ranking if @game.round > 0
     res
   end
@@ -131,10 +167,14 @@ end
 class Game
   include JsonHelper
 
+  VALID_ACTIONS = [:check, :call, :raise, :fold]
+
   attr_reader :deck
 
   # index of player with dealing button
   attr_reader :button
+
+  attr_reader :money_in_pot
 
   # array of PlayerInGame objects
   attr_reader :pigs
@@ -150,11 +190,15 @@ class Game
 
   attr_reader :community_cards
 
+  # array of names (ids) of the winner(s)
+  attr_reader :winners
+
   # serializable, public state of the table (can be sent to clients)
   # cards in players' hands not included
   def get_state
-    h = attr2hash(:button, :round, :last_raiser, :waiting_for, :deadline, :community_cards)
+    h = attr2hash(:community_cards, :money_in_pot, :button, :round, :last_raiser, :waiting_for, :deadline)
     h[:pigs] = pigs.map {|p| p.get_state}
+    h[:winners] = @winners
     h[:finished] = @finished
     return h
   end
@@ -183,6 +227,7 @@ class Game
     @last_raiser = @waiting_for
     @community_cards = []
     @finished = false
+    @winners = []
   end
 
   def add_to_pot(amount)
@@ -218,17 +263,17 @@ class Game
 
     if finished?
       if still_playing.size == 1
-        winners = [still_playing[0].player]
+        wins = [still_playing[0].player]
       else
-        winner = nil
         hands = still_playing.map { |p| Hand.new(community_cards + p.cards) }
         winnerhand = hands.max
-        winners = still_playing.select.with_index { |p, i| hands[i] == winnerhand }
+        wins = still_playing.select.with_index { |p, i| hands[i] == winnerhand }.map(&:player)
       end
-      $log.debug("The winner(s): #{winners}")
-      amount = @money_in_pot / winners.size
-      winners.each { |w| w.add_money(amount) }
-      winners[0].add_money(@money_in_pot - amount * winners.size)
+      $log.debug("The winner(s): #{wins}")
+      amount = @money_in_pot / wins.size
+      wins.each { |w| w.add_money(amount) }
+      wins[0].add_money(@money_in_pot - amount * wins.size)
+      @winners = wins.map(&:name)
     end
   end
 
@@ -273,21 +318,37 @@ class Game
 end
 
 class Player
-  attr_reader :id, :nickname
+  @@players = {}
+
+  attr_reader :name
   attr_accessor :active
-  def initialize(id, nickname)
-    @id = id
-    @nickname = nickname
+
+  def initialize(name)
+    $log.debug("Player.new(#{name})")
+    @name = name
     @active = true
+    @@players[name] = self
   end
 
   def to_s
-    "#{nickname}"
+    "#{name}"
   end
+
+  def self.get_by_name(name)
+    @@players[name]
+  end
+
+  def self.players
+    @@players
+  end
+
 end
 
 # One poker table.
 class Table
+  @@tables = {}
+
+  attr_reader :name
   # creator of the table, can start the game
   attr_reader :owner
 
@@ -332,51 +393,79 @@ class Table
     end
 
     def get_state
-      attr2hash(:starting_money, :money, :nickname)
+      attr2hash(:name, :starting_money, :money)
     end
 
     def to_s
-      "#{nickname}(#{money})"
+      "#{name}(#{money})"
     end
 
     def inspect
-      "#<PAT: @nickname: #{nickname}, @money: #{money}>"
+      "#<PAT: @name: #{name}, @money: #{money}>"
     end
   end
 
 
-  def initialize(owner)
+  def initialize(name, owner)
+    @name = name
+
     # TODO parameterize
     @starting_money = 1000
     @timeout = 30
 
-    @owner = owner
     @players = [PlayerAtTable.new(owner, @starting_money, self)]
+    @owner = @players[0]
+
+    class << @players
+      def by_name(name)
+        self.find { |p| p.name == name }
+      end
+    end
+
     @pending_players = []
     @current_game = nil
     @button = 0
+
+    @@tables[name] = self
   end
 
   def start_game
-    @players += @pending_players
+    @players.concat(@pending_players)
     @pending_players = []
+
+    return false if @players.size < 2
 
     # TODO check if no ongoing game
     @current_game = Game.new(self, @button, @timeout)
     @button = (@button + 1) % players.size
-
     emit_events
+    return true
   end
 
   def add_player(player)
-    @pending_players << PlayerAtTable.new(player, @starting_money, self)
+    # TODO what about pending_players?
+    if @players.by_name(player.name)
+      @log.debug("Table#add_player(#{player.name}): already added")
+      return @players.by_name(player.name)
+    end
+    pat = PlayerAtTable.new(player, @starting_money, self)
+    if !@current_game || @current.game.finished?
+      @players << pat
+    else
+      @pending_players << pat
+    end
+    return pat
   end
 
   def remove_player(player)
     # TODO, may be complicated if in game
   end
 
-  def action(what, who, raise_amount=0)
+  # what: Symbol
+  # who: PlayerAtTable
+  # raise_amount: Integer
+  def action(what, who, raise_amount=nil)
+    raise_amount = 0 if !raise_amount
     if current_game
       # TODO check finished before and after...
       current_game.action(what, who, raise_amount)
@@ -385,11 +474,25 @@ class Table
   end
 
   def emit_events
-    EventMgr.notify(GameStateEvent.new(self, current_game.get_state))
-    EventMgr.notify(WhosNextEvent.new(self, {
+    table_ch = "table-#{name}"
+    EventMgr.notify(GameStateEvent.new(table_ch, current_game.get_state))
+    # TODO csak a sajat eventet kell megkapni
+    EventMgr.notify(WhosNextEvent.new(table_ch, {
       player: current_game.act_pig.player,
       actions: current_game.valid_actions_for_next
     }))
+    current_game.pigs.each { |pig|
+      ch = current_game.finished? ? table_ch : "player-#{pig.player.name}"
+      EventMgr.notify(PlayerCardsEvent.new(ch, pig.get_private_state))
+    }
+  end
+
+  def self.get_by_name(name)
+    @@tables[name]
+  end
+
+  def self.get_table_names
+    ['dummy'] + @@tables.keys
   end
 
 end
