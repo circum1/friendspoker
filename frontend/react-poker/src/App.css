@@ -1,5 +1,9 @@
 .App {
-  text-align: center;
+  /* text-align: center; */
+}
+
+.suit-D,.suit-H {
+  color: red;
 }
 
 .App-logo {

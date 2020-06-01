@@ -9,6 +9,7 @@ class PokerApi < Sinatra::Application
 
   before do
     content_type :json
+    response.headers["Access-Control-Allow-Origin"] = "*"
   end
 
   helpers do
@@ -22,8 +23,8 @@ class PokerApi < Sinatra::Application
 
     # indirection -- for debug, we generate pretty format
     def mk_json(obj)
-      # JSON.pretty_generate(obj)
-      JSON.generate(obj)
+      JSON.pretty_generate(obj)
+      # JSON.generate(obj)
     end
 
     def check_keys(obj, *keys)
@@ -34,18 +35,23 @@ class PokerApi < Sinatra::Application
 
     def authenticate
       username = request.env['HTTP_X_USERNAME']
-      fail([401, "Missing X-Username header"]) if !username
-      @player = Player.get_by_name(username)
-      @player ||= Player.new(username)
+      fail([403, "Missing X-Username header"]) if !username
+      name, pass = username.split(":")
+      fail([403, "Missing username"]) if !name || name.size < 1
+      @player = Player.get_by_name(name)
+      fail([403, "Bad password"]) if @player && !@player.auth(pass)
+      # implicit user creation (no need for signing in)
+      @player ||= Player.new(name, pass)
+      $log.debug("\"#{request.request_method} #{request.fullpath}\" - authenticated with user #{@player.name}")
     end
 
     # Table-related endpoints for members at that table
     def table_context
       authenticate
       @table = Table.get_by_name(params['name'])
+      fail([404, "Table with name #{params['name']} not found!"]) if !@table
       # promote @player to PlayerAtTable object from Player
       @player = @table.players.by_name(@player.name)
-      fail([404, "Table with name #{params['name']} not found!"]) if !@table
     end
   end
 
@@ -58,7 +64,7 @@ class PokerApi < Sinatra::Application
   #   channel: channel to subscribe -- 'player-<name>' channel is implicit
   get '/poll-events' do
     authenticate
-    $log.debug("/poll-events on #{params[:channel]}")
+    $log.debug("/poll-events for user #{@player.name} on #{params[:channel]}")
     channels = params[:channel].split(",")
     fail([400, "Oh, come on..."]) if channels.any?(/^player-/)
     channels << "player-#{@player.name}"
@@ -71,8 +77,8 @@ class PokerApi < Sinatra::Application
         $log.info("Callback called for /poll-events connection")
         unsub.call()
       }
-      out.errback {
-        $log.info("Errback called for /poll-events connection")
+      out.errback { |e|
+        $log.info("Errback called for /poll-events connection: #{e}")
         unsub.call()
       }
     end
@@ -105,6 +111,13 @@ class PokerApi < Sinatra::Application
     @table = Table.get_by_name(params['name'])
     fail([404, "Table with name #{params['name']} not found!"]) if !@table
     @table.add_player(@player)
+    [204]
+  end
+
+  # trigger sending out current state of the table
+  get '/tables/:name/resend-events' do
+    table_context
+    @table.emit_events
     [204]
   end
 
@@ -141,6 +154,14 @@ class PokerApi < Sinatra::Application
     channel ||= 'test'
     EventMgr.notify(MessageEvent.new(channel, "Msg: #{msg}"))
     halt [200, "Event with message '#{msg}' created\n"]
+  end
+
+  options "*" do
+    response.headers["Access-Control-Allow-Methods"] = "GET, PUT, POST, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, X-Auth-Token, X-Username"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Max-Age"] = "1"
+    [204]
   end
 
 end

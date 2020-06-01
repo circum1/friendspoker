@@ -95,14 +95,14 @@ class MyApp < Sinatra::Application
     # run! if app_file == $0
 end
 
-# curl -k -X POST -H "X-username: p1" http://localhost:4567/tables/test
-# curl -k -X POST -H "X-username: p2" http://localhost:4567/tables/test/join
-# curl -k -X POST -H "X-username: p1" http://localhost:4567/tables/test/start
-# curl -k -H "X-username: p2" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p1" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p2" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p1" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p2" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p1" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p2" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
-# curl -k -H "X-username: p1" --data-binary '{"what": "call"}' http://localhost:4567/tables/test/action
+# curl -k -X POST -H "X-username: p1:x" http://localhost:4567/api/tables/test
+# curl -k -X POST -H "X-username: p2:x" http://localhost:4567/api/tables/test/join
+# curl -k -X POST -H "X-username: p1:x" http://localhost:4567/api/tables/test/start
+# curl -k -H "X-username: p2:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p1:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p2:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p1:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p2:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p1:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p2:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action
+# curl -k -H "X-username: p1:x" --data-binary '{"what": "call"}' http://localhost:4567/api/tables/test/action

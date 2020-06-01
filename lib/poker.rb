@@ -46,6 +46,7 @@ class PokerEvent
   end
 end
 
+class TickEvent < PokerEvent; end
 class WhosNextEvent < PokerEvent; end
 class GameStateEvent < PokerEvent; end
 class PlayerCardsEvent < PokerEvent; end
@@ -53,11 +54,29 @@ class MessageEvent < PokerEvent; end
 
 module EventMgr
   @@next_id = 1
+  @@ticker_runs = false
+  # list of {channel: c, smallest_id: smallest_id, block: block} hashes
   @@subscribers = []
+
+  def self.launchTicker
+    @@ticker_runs = true
+    $log.debug("Starting ticker timer");
+    timer = EventMachine::PeriodicTimer.new(10) do
+      event = TickEvent.new("", {})
+      event.id = @@next_id
+      @@next_id += 1
+      @@subscribers.each { |s|
+        s[:block].call(event)
+      }
+    end
+  end
 
   # channel is arbitrary identifier -- using table names & user names
   # sends out only event with id not lesser than smallest_id
+  # TODO remove smallest_id
   def self.subscribe(channel, smallest_id, &block)
+    launchTicker if !@@ticker_runs
+
     channel = [channel] if !channel.respond_to?(:each)
     objs = []
     channel.each { |c|
@@ -90,6 +109,7 @@ module EventMgr
       s[:block].call(event)
     }
   end
+
 end
 
 class Lobby
@@ -323,9 +343,9 @@ class Player
   attr_reader :name
   attr_accessor :active
 
-  def initialize(name)
-    $log.debug("Player.new(#{name})")
-    @name = name
+  def initialize(name, password=nil)
+    $log.debug("Player.new(#{name}, ...)")
+    @name, @password = name, password
     @active = true
     @@players[name] = self
   end
@@ -334,8 +354,12 @@ class Player
     "#{name}"
   end
 
+  def auth(password)
+    password == @password
+  end
+
   def self.get_by_name(name)
-    @@players[name]
+    p = @@players[name]
   end
 
   def self.players
@@ -445,7 +469,7 @@ class Table
   def add_player(player)
     # TODO what about pending_players?
     if @players.by_name(player.name)
-      @log.debug("Table#add_player(#{player.name}): already added")
+      $log.debug("Table#add_player(#{player.name}): already added")
       return @players.by_name(player.name)
     end
     pat = PlayerAtTable.new(player, @starting_money, self)
@@ -474,6 +498,7 @@ class Table
   end
 
   def emit_events
+    return if !current_game
     table_ch = "table-#{name}"
     EventMgr.notify(GameStateEvent.new(table_ch, current_game.get_state))
     # TODO csak a sajat eventet kell megkapni
