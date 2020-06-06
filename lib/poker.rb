@@ -55,13 +55,13 @@ class MessageEvent < PokerEvent; end
 module EventMgr
   @@next_id = 1
   @@ticker_runs = false
-  # list of {channel: c, smallest_id: smallest_id, block: block} hashes
+  # list of {channel: c, conn_id: conn_id, block: block} hashes
   @@subscribers = []
 
   def self.launchTicker
     @@ticker_runs = true
     $log.debug("Starting ticker timer");
-    timer = EventMachine::PeriodicTimer.new(10) do
+    timer = EventMachine::PeriodicTimer.new(30) do
       event = TickEvent.new("", {})
       event.id = @@next_id
       @@next_id += 1
@@ -71,19 +71,31 @@ module EventMgr
     end
   end
 
-  # channel is arbitrary identifier -- using table names & user names
-  # sends out only event with id not lesser than smallest_id
-  # TODO remove smallest_id
-  def self.subscribe(channel, smallest_id, &block)
+  def self.close_connection(conn_id)
+    found = false
+    $log.debug("close_connection with id #{conn_id}")
+
+    @@subscribers.select { |s| s[:conn_id] == conn_id }.each do |s|
+      # will be called multiple times (because of more than one channel), but that's not a problem
+      s[:block].call(nil)
+      found = true
+    end
+    found
+  end
+
+  # channel is a list of arbitrary identifiers -- using table names & user names
+  # id is to identify the subscription in close_connection
+  def self.subscribe(channel, conn_id, &block)
     launchTicker if !@@ticker_runs
 
     channel = [channel] if !channel.respond_to?(:each)
     objs = []
     channel.each { |c|
-      obj = {channel: c, smallest_id: smallest_id, block: block}
+      obj = {channel: c, conn_id: conn_id, block: block}
       @@subscribers << obj
       objs << obj
     }
+    $log.debug("subscribe with id #{conn_id}")
     return proc {
       objs.each { |o| unsubscribe(o) }
     }
@@ -102,12 +114,20 @@ module EventMgr
     @@next_id += 1
     $log.debug("EventMgr#notify(#{event})")
 
-    @@subscribers.select { |s|
-      s[:channel] == event.channel && s[:smallest_id] <= event.id
-    }.map { |s|
+    @@subscribers.select { |s| s[:channel] == event.channel }.map { |s|
       $log.debug("EventMgr#notify() sending to subscriber")
       s[:block].call(event)
     }
+  end
+
+  # Checks for user-private channel names (with pattern "player-<name>[:<suffix>]")
+  # Returns username or false
+  def self.needs_auth?(channels)
+    channels = [channels] if !channels.respond_to?(:each)
+    p = channels.map{ |c| /^player-([^:]+):/.match(c)&.[](1) }.compact.uniq
+    raise InvalidActionError, "Cannot auth to more than one 'player-*' channels" if p.size > 1
+    return false if p.size == 0
+    return p[0]
   end
 
 end
@@ -507,7 +527,7 @@ class Table
       actions: current_game.valid_actions_for_next
     }))
     current_game.pigs.each { |pig|
-      ch = current_game.finished? ? table_ch : "player-#{pig.player.name}"
+      ch = current_game.finished? ? table_ch : "player-#{pig.player.name}:#{name}"
       EventMgr.notify(PlayerCardsEvent.new(ch, pig.get_private_state))
     }
   end

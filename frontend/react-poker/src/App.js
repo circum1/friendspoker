@@ -5,12 +5,16 @@ import './App.css';
 var RestApiHost = 'localhost:4567'
 
 class PokerTable extends React.Component {
+  // props:
+  // credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}
   constructor(props) {
     super(props);
+
     this.state = {
       gamestate: null,
+      playercards: null,
       error: null,
-      numberOfFetches: 0
+      clientId: Math.random().toString(36).substr(2, 5)
     };
     this.tableClosed = false;
     // this.pollEvents = this.pollEvents.bind(this)
@@ -21,41 +25,60 @@ class PokerTable extends React.Component {
   }
 
   pollEvents() {
-    console.log("pollEvents called, numberOfFetches: " + this.state.numberOfFetches);
-    this.setState((state) => ({numberOfFetches: state.numberOfFetches + 1}));
-    fetch(`http://${RestApiHost}/api/poll-events?channel=table-${this.props.tablename}`,
-    this.getHeaders()
-    )
-      .then(response => {
-        console.log("pollEvents succeeded, numberOfFetches: " + this.state.numberOfFetches);
-        if (response.ok) {
-          return response.json();
-        } else {
-          throw new Error(`State error: ${response.status} ${response.statusText} - ${response.text()}`);
+    // console.log("pollEvents called, numberOfFetches: " + this.state.numberOfFetches);
+    fetch(`http://${RestApiHost}/api/poll-events?channel=table-${this.props.tablename},player-${this.props.username}:${this.props.tablename}&dontclose&id=${this.state.clientId}`,
+      this.getHeaders()
+    ).then(response => {
+      // console.log("pollEvents succeeded, numberOfFetches: " + this.state.numberOfFetches);
+      if (response.ok) {
+        var buffer = "";
+        var reader = response.body.getReader();
+
+        var processEvent = resp => {
+          console.log(`Event with type ${resp.evt.type} received`, resp);
+          if (resp.evt.type == "GameStateEvent") {
+            this.setState({ "gamestate": resp.evt.event });
+          } else if (resp.evt.type == "PlayerCardsEvent") {
+            this.setState({ "playercards": resp.evt.event });
+          }
         }
-      })
-      .then(resp => {
-        console.log("Event received", resp);
-        if (resp.evt.type == "GameStateEvent") {
-          this.setState({ "gamestate": resp.evt.event });
+
+        function findNextEvent({done, value}) {
+          var chunk = new TextDecoder("utf-8").decode(value);
+          var sep = "\n{\"separator\":\"cb935688-891a-45d1-9692-0275ab14be96\"}\n";
+          if (done) {
+            console.log("pollEvents got end-of-stream");
+            return;
+          }
+          // console.log("got chunk: ", chunk);
+          buffer += chunk;
+          var ind;
+          while ((ind = buffer.indexOf(sep)) >= 0) {
+            var json = buffer.substring(0, ind);
+            // console.log("json found: ", json);
+            buffer = buffer.substring(ind + sep.length);
+            // console.log("new buffer:", buffer);
+
+            processEvent(JSON.parse(json));
+          }
+          return reader.read().then(findNextEvent);
         }
-        if (this.state.numberOfFetches <= 1) {
-          console.log("Restarting fetch /poll-events");
-          this.pollEvents();
-        }
-        console.log("Decreasing numberOfFetches from " + this.state.numberOfFetches);
-        this.setState((state) => ({numberOfFetches: state.numberOfFetches - 1}));
-      })
-      .catch(error => {
-        console.error("/poll-events error, numberOfFetches: " + this.state.numberOfFetches + " -> decrease");
-        console.error(`Fetch error: ${error}`);
-        this.setState((state) => ({gamestate: null, error: error, numberOfFetches: state.numberOfFetches - 1}));
-      });
+
+        return reader.read().then(findNextEvent);
+        // return response.json();
+      } else {
+        throw new Error(`State error: ${response.status} ${response.statusText} - ${response.text()}`);
+      }
+    }).catch(error => {
+      console.error(`Fetch error: ${error}`);
+      this.setState((state) => ({ gamestate: null, error: error }));
+    });
   }
 
-  componentDidMount() {
+  async componentDidMount() {
     console.log("PokerTable.componentDidMount()");
-    this.setState({ gamestate: null });
+    this.setState({ gamestate: null, playercards: null });
+    await fetch(`http://${RestApiHost}/api/cancel-poll?id=${this.state.clientId}`, this.getHeaders() );
     this.pollEvents();
     fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/resend-events`, this.getHeaders() );
   }
@@ -69,7 +92,7 @@ class PokerTable extends React.Component {
 
   render() {
     // console.log("state:", this.state);
-    if (!this.state.gamestate) {
+    if (!this.state.gamestate || !this.state.playercards) {
       return (<div>No active game...</div>);
     }
     if (!this.props.credentials) {
@@ -86,7 +109,9 @@ class PokerTable extends React.Component {
         {this.state.gamestate.pigs.map((pig, i) => {
           return (
             <div key={pig.name}>
-              <h4 key={pig.name}>Player {pig.name}{i==this.state.gamestate.button ? " (button)" : ""}{i==this.state.gamestate.waiting_for ? " (in turn)" : ""}{pig.folded ? " (folded)" : ""}</h4>
+              <h4 key={pig.name}>Player {pig.name}{i==this.state.gamestate.button ? " (button)" : ""
+                }{i==this.state.gamestate.waiting_for ? " (in turn)" : ""}{pig.folded ? " (folded)" : ""
+                }</h4>
               <div>Money: {pig.money}</div>
               <div>Bet in this round: {pig.money_in_round}</div>
 
@@ -101,8 +126,8 @@ class PokerTable extends React.Component {
         })}
         <h3>Board</h3>
         <div>
-        Community cards: {this.state.gamestate.community_cards.map((c) =>
-          <span class={`suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`} </span>
+        Community cards: {this.state.gamestate.community_cards.map((c, i) =>
+          <span key={i} className={`suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`} </span>
         )}
         </div>
         <div>

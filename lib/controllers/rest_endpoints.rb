@@ -29,7 +29,7 @@ class PokerApi < Sinatra::Application
 
     def check_keys(obj, *keys)
       if (keys - obj.keys.map(&:to_sym)).size > 0
-        fail([400, "Missing properties: #{(keys - obj.keys).map(&:to_s).join(", ")}"])
+        fail([400, "Missing properties: #{(keys.map(&:to_s) - obj.keys.map(&:to_s)).join(", ")}"])
       end
     end
 
@@ -62,16 +62,26 @@ class PokerApi < Sinatra::Application
   # Poll events for
   # request params:
   #   channel: channel to subscribe -- 'player-<name>' channel is implicit
+  #   id: id for /cancel-poll endpoint
   get '/poll-events' do
     authenticate
     $log.debug("/poll-events for user #{@player.name} on #{params[:channel]}")
+    check_keys(params, :channel, :id)
     channels = params[:channel].split(",")
-    fail([400, "Oh, come on..."]) if channels.any?(/^player-/)
+    if (expectedName = EventMgr.needs_auth?(channels))
+      fail([403, "Unauthorized channel for this user"]) if expectedName != @player.name
+    end
+
     channels << "player-#{@player.name}"
     stream(:keep_open) do |out|
-      unsub = EventMgr.subscribe(channels, 0) { |evt|
-        out << "#{mk_json(evt)}\n"
-        out.close if !params.has_key?('dontclose')
+      unsub = EventMgr.subscribe(channels, "#{@player.name}:#{params[:id]}") { |evt|
+        if evt
+          out << "#{mk_json(evt)}"
+          out << "\n{\"separator\":\"cb935688-891a-45d1-9692-0275ab14be96\"}\n"
+          out.close if !params.has_key?('dontclose')
+        else
+          out.close
+        end
       }
       out.callback {
         $log.info("Callback called for /poll-events connection")
@@ -82,6 +92,14 @@ class PokerApi < Sinatra::Application
         unsub.call()
       }
     end
+  end
+
+  get '/cancel-poll' do
+    authenticate
+    $log.debug("/cancel-poll for user #{@player.name}, id: #{params[:id]}")
+    check_keys(params, :id)
+    fail([404, "id #{params[:id]} not found"]) if !EventMgr.close_connection("#{@player.name}:#{params[:id]}")
+    [204]
   end
 
   #
