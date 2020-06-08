@@ -4,6 +4,17 @@ import './App.css';
 
 var RestApiHost = 'localhost:4567'
 
+function PokerCards(props) {
+  const suitMap = { S: '♠', H: '♥', D: '♦', C: '♣' };
+  return (
+    <span>
+      {props.cards.map((c, i) =>
+        <span key={i} className={`suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`}</span>
+      )}
+    </span>
+  );
+}
+
 class PokerTable extends React.Component {
   // props:
   // credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}
@@ -11,13 +22,24 @@ class PokerTable extends React.Component {
     super(props);
 
     this.state = {
-      gamestate: null,
-      playercards: null,
-      error: null,
       clientId: Math.random().toString(36).substr(2, 5)
     };
+    this.state = Object.assign(this.state, this.getInitState());
     this.tableClosed = false;
     // this.pollEvents = this.pollEvents.bind(this)
+    this.handleActionButton = this.handleActionButton.bind(this);
+    this.handleAmountChange = this.handleAmountChange.bind(this);
+
+  }
+
+  getInitState() {
+    return {
+      gamestate: null,
+      playercards: {},
+      whosnext: null,
+      error: null,
+      raiseAmount: 20
+    };
   }
 
   getHeaders() {
@@ -38,8 +60,14 @@ class PokerTable extends React.Component {
           console.log(`Event with type ${resp.evt.type} received`, resp);
           if (resp.evt.type == "GameStateEvent") {
             this.setState({ "gamestate": resp.evt.event });
+          } else if (resp.evt.type == "WhosNextEvent") {
+            this.setState({ "whosnext": resp.evt.event });
           } else if (resp.evt.type == "PlayerCardsEvent") {
-            this.setState({ "playercards": resp.evt.event });
+            this.setState((state) => {
+              var newobj = Object.assign({}, state.playercards);
+              newobj[resp.evt.event.player] = resp.evt.event;
+              return {"playercards": newobj};
+            });
           }
         }
 
@@ -77,7 +105,8 @@ class PokerTable extends React.Component {
 
   async componentDidMount() {
     console.log("PokerTable.componentDidMount()");
-    this.setState({ gamestate: null, playercards: null });
+    this.setState(this.getInitState());
+    // cancel any /poll-events request currently running
     await fetch(`http://${RestApiHost}/api/cancel-poll?id=${this.state.clientId}`, this.getHeaders() );
     this.pollEvents();
     fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/resend-events`, this.getHeaders() );
@@ -90,8 +119,27 @@ class PokerTable extends React.Component {
     }
   }
 
+  async handleActionButton(event, action) {
+    var payload = {
+      what: action,
+    };
+    if (['raise', 'bet'].includes(action)) {
+      payload["raise_amount"] = this.state.raiseAmount;
+    }
+    // TODO block UI until ready
+    await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/action`, Object.assign({
+        method: "POST",
+        body: JSON.stringify(payload)
+      }, this.getHeaders())
+    );
+  }
+
+  handleAmountChange(event) {
+    this.setState({raiseAmount: event.target.value});
+  }
+
   render() {
-    // console.log("state:", this.state);
+    console.log("state:", this.state);
     if (!this.state.gamestate || !this.state.playercards) {
       return (<div>No active game...</div>);
     }
@@ -109,11 +157,37 @@ class PokerTable extends React.Component {
         {this.state.gamestate.pigs.map((pig, i) => {
           return (
             <div key={pig.name}>
-              <h4 key={pig.name}>Player {pig.name}{i==this.state.gamestate.button ? " (button)" : ""
-                }{i==this.state.gamestate.waiting_for ? " (in turn)" : ""}{pig.folded ? " (folded)" : ""
+              <h4 key={pig.name}>Player {pig.name}{i==this.state.gamestate.button && " (button)"
+                }{i==this.state.gamestate.waiting_for && !this.state.gamestate.finished && " (in turn)"
+                }{pig.folded && " (folded)"
+                }{this.state.gamestate.winners.includes(pig.name) && " (winner)"
                 }</h4>
+              {this.state.playercards[pig.name] &&
+                <div>
+                  Cards: <PokerCards cards={this.state.playercards[pig.name].cards}/> ({this.state.playercards[pig.name].rank})
+                </div>
+              }
               <div>Money: {pig.money}</div>
               <div>Bet in this round: {pig.money_in_round}</div>
+              {!this.state.gamestate.finished && this.state.whosnext && this.props.username == pig.name && this.props.username == this.state.whosnext.player &&
+                <div>
+                Actions:
+                {this.state.whosnext.actions.map((act) => {
+                  var needsraise = ['raise', 'bet'].includes(act);
+                    return <span key={act}>
+                      { needsraise &&
+                        <input type="text" pattern="[0-9]+" onInput={this.handleAmountChange} value={this.state.raiseAmount}/>
+                      }
+                      <button onClick={(e) => this.handleActionButton(e, act)} className="actionButton">{act
+                        }{needsraise && ` $${this.state.raiseAmount}`
+                        }{act=="call" && ` $${this.state.whosnext.call_amount}`}
+                      </button>
+                    </span>;
+                })}
+                </div>
+              }
+              <div>
+              </div>
 
               {/* "name": "p1",
       "starting_money": 1000,
@@ -126,9 +200,7 @@ class PokerTable extends React.Component {
         })}
         <h3>Board</h3>
         <div>
-        Community cards: {this.state.gamestate.community_cards.map((c, i) =>
-          <span key={i} className={`suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`} </span>
-        )}
+          Community cards: <PokerCards cards={this.state.gamestate.community_cards}/>
         </div>
         <div>
           Money in pot: {this.state.gamestate.money_in_pot}

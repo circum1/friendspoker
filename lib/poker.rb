@@ -157,6 +157,7 @@ class PlayerInGame
     @money_in_round += amount
   end
 
+  # :bet should be translated to :raise by caller
   def action(what, max_bet, raise_amount=0)
     $log.debug("PIG#action(#{what}, #{max_bet}, #{raise_amount})")
     raise InvalidActionError, "player #{player} already folded" if @folded
@@ -174,11 +175,9 @@ class PlayerInGame
     else
       raise InvalidActionError, "Unknown action #{:what}"
     end
-    @last_action = what
   end
 
   def nextRound
-    @last_action = nil
     @money_in_round = 0
   end
 
@@ -207,7 +206,7 @@ end
 class Game
   include JsonHelper
 
-  VALID_ACTIONS = [:check, :call, :raise, :fold]
+  VALID_ACTIONS = [:check, :call, :bet, :raise, :fold]
 
   attr_reader :deck
 
@@ -278,25 +277,33 @@ class Game
     @pigs[@waiting_for]
   end
 
-  def valid_actions_for_next
-    res = [:fold]
-    res << :raise if act_pig.player.money > 0
-    if @pigs.map(&:money_in_round).max <= act_pig.money_in_round
-      res << :check
+  def get_next_actions
+    res = {
+      player: act_pig.player,
+      actions: [:fold],
+      call_amount: nil
+    }
+    maxbet = @pigs.map(&:money_in_round).max
+    if maxbet <= act_pig.money_in_round
+      res[:actions] << :check
     else
-      res << :call
+      res[:actions] << :call
+      res[:call_amount] = maxbet - act_pig.money_in_round
     end
+    res[:actions] << (maxbet == 0 ? :bet : :raise) if act_pig.player.money > 0
+    return res
   end
-
 
   def action(what, who, raise_amount = 0)
     raise InvalidActionError, "Game has finished" if finished?
     raise InvalidActionError,
       "Action from player #{who} but it's #{act_pig.player}'s turn'" if act_pig.player != who
 
+    what = :raise if what == :bet
+
     maxbet = @pigs.map(&:money_in_round).max
     act_pig.action(what, maxbet, raise_amount)
-    @last_raiser = @waiting_for if what == :raise
+    @last_raiser = @waiting_for if [:raise, :bet].include?(what)
 
     still_playing = @pigs.select { |p| p.folded == false }
     whos_next(still_playing)
@@ -522,10 +529,7 @@ class Table
     table_ch = "table-#{name}"
     EventMgr.notify(GameStateEvent.new(table_ch, current_game.get_state))
     # TODO csak a sajat eventet kell megkapni
-    EventMgr.notify(WhosNextEvent.new(table_ch, {
-      player: current_game.act_pig.player,
-      actions: current_game.valid_actions_for_next
-    }))
+    EventMgr.notify(WhosNextEvent.new(table_ch, current_game.get_next_actions))
     current_game.pigs.each { |pig|
       ch = current_game.finished? ? table_ch : "player-#{pig.player.name}:#{name}"
       EventMgr.notify(PlayerCardsEvent.new(ch, pig.get_private_state))

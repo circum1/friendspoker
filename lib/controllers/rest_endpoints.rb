@@ -150,7 +150,7 @@ class PokerApi < Sinatra::Application
     req = JSON.load(request.body.read)
     check_keys(req, :what)
     what = req['what'].downcase.to_sym
-    if what == :raise
+    if [:raise, :bet].include?(what)
       check_keys(req, :raise_amount)
       raise_amount = req['raise_amount'].to_i
       fail([400, "Invalid raise amount '#{req['raise_amount']}'"]) if raise_amount == 0
