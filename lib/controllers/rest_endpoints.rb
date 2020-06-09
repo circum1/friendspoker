@@ -74,6 +74,7 @@ class PokerApi < Sinatra::Application
 
     channels << "player-#{@player.name}"
     stream(:keep_open) do |out|
+      # this code runs asynchronously
       unsub = EventMgr.subscribe(channels, "#{@player.name}:#{params[:id]}") { |evt|
         if evt
           out << "#{mk_json(evt)}"
@@ -108,6 +109,7 @@ class PokerApi < Sinatra::Application
 
   # list tables available
   get '/tables' do
+    authenticate
     mk_json(Table.get_table_names)
   end
 
@@ -132,16 +134,21 @@ class PokerApi < Sinatra::Application
     [204]
   end
 
-  # trigger sending out current state of the table
-  get '/tables/:name/resend-events' do
-    table_context
-    @table.emit_events
-    [204]
-  end
+  # # trigger sending out current state of the table
+  # get '/tables/:name/resend-events' do
+  #   table_context
+  #   @table.emit_events
+  #   [204]
+  # end
 
   post '/tables/:name/start' do
     table_context
-    fail([400, "Not enough players"]) if !@table.start_game
+    begin
+      !@table.start_game
+    rescue InvalidActionError => e
+      $log.info(e)
+      fail([400, e.to_s])
+    end
     [204]
   end
 

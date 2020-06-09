@@ -1,5 +1,4 @@
 import React from 'react';
-import logo from './logo.svg';
 import './App.css';
 
 var RestApiHost = 'localhost:4567'
@@ -15,6 +14,10 @@ function PokerCards(props) {
   );
 }
 
+function getCredsHeader(creds) {
+  return {headers: {'X-Username': creds}};
+}
+
 class PokerTable extends React.Component {
   // props:
   // credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}
@@ -28,6 +31,7 @@ class PokerTable extends React.Component {
     this.tableClosed = false;
     // this.pollEvents = this.pollEvents.bind(this)
     this.handleActionButton = this.handleActionButton.bind(this);
+    this.handleStartGame = this.handleStartGame.bind(this);
     this.handleAmountChange = this.handleAmountChange.bind(this);
 
   }
@@ -47,6 +51,8 @@ class PokerTable extends React.Component {
   }
 
   pollEvents() {
+    console.log("pollEvents()");
+
     // console.log("pollEvents called, numberOfFetches: " + this.state.numberOfFetches);
     fetch(`http://${RestApiHost}/api/poll-events?channel=table-${this.props.tablename},player-${this.props.username}:${this.props.tablename}&dontclose&id=${this.state.clientId}`,
       this.getHeaders()
@@ -73,6 +79,7 @@ class PokerTable extends React.Component {
 
         function findNextEvent({done, value}) {
           var chunk = new TextDecoder("utf-8").decode(value);
+          console.log("findNextEvent() chunk: ", chunk);
           var sep = "\n{\"separator\":\"cb935688-891a-45d1-9692-0275ab14be96\"}\n";
           if (done) {
             console.log("pollEvents got end-of-stream");
@@ -92,6 +99,7 @@ class PokerTable extends React.Component {
           return reader.read().then(findNextEvent);
         }
 
+        console.log("pollEvents succeeded, got response", response);
         return reader.read().then(findNextEvent);
         // return response.json();
       } else {
@@ -109,7 +117,6 @@ class PokerTable extends React.Component {
     // cancel any /poll-events request currently running
     await fetch(`http://${RestApiHost}/api/cancel-poll?id=${this.state.clientId}`, this.getHeaders() );
     this.pollEvents();
-    fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/resend-events`, this.getHeaders() );
   }
 
   componentDidUpdate(prev) {
@@ -117,6 +124,24 @@ class PokerTable extends React.Component {
     if (prev.credentials != this.props.credentials || prev.tablename != this.props.tablename) {
       this.componentDidMount();
     }
+  }
+
+  async handleStartGame(event) {
+    // clear other players' old hand data
+    this.setState(this.getInitState());
+    try {
+      var response = await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/start`, Object.assign({
+          method: "POST",
+        }, this.getHeaders())
+      )
+      if (!response.ok) {
+        throw new Error(`Fetch error: ${response.status} ${response.statusText} - ${await response.text()}`);
+      }
+    } catch (error) {
+      console.error(`Fetch error: ${error}`);
+      this.setState((state) => ({ gamestate: null, error: error }));
+      alert(error);
+    };
   }
 
   async handleActionButton(event, action) {
@@ -140,11 +165,11 @@ class PokerTable extends React.Component {
 
   render() {
     console.log("state:", this.state);
-    if (!this.state.gamestate || !this.state.playercards) {
-      return (<div>No active game...</div>);
-    }
     if (!this.props.credentials) {
       return (<div>Please log in</div>);
+    }
+    if (!this.state.gamestate || !this.state.playercards) {
+      return (<div> <button onClick={this.handleStartGame}>New deal</button> </div>);
     }
     if (!this.state.gamestate.pigs.find(p => p.name == this.props.username)) {
       return (<div>Not joined to the table</div>);
@@ -152,12 +177,11 @@ class PokerTable extends React.Component {
     const suitMap = { S: '♠', H: '♥', D: '♦', C: '♣' };
     return (
       <div>
-        <h3>Gamestate:</h3>
-        Players:
+        <h3>Table {this.props.tablename}</h3>
         {this.state.gamestate.pigs.map((pig, i) => {
           return (
             <div key={pig.name}>
-              <h4 key={pig.name}>Player {pig.name}{i==this.state.gamestate.button && " (button)"
+              <h4 className={pig.name==this.props.username ? "myself" : ""} key={pig.name}>Player {pig.name}{i==this.state.gamestate.button && " (button)"
                 }{i==this.state.gamestate.waiting_for && !this.state.gamestate.finished && " (in turn)"
                 }{pig.folded && " (folded)"
                 }{this.state.gamestate.winners.includes(pig.name) && " (winner)"
@@ -205,9 +229,14 @@ class PokerTable extends React.Component {
         <div>
           Money in pot: {this.state.gamestate.money_in_pot}
         </div>
-        <pre>
+        {this.state.gamestate.finished &&
+        <div>
+          <button onClick={this.handleStartGame}>New deal</button>
+        </div>
+        }
+        {/* <pre>
           {JSON.stringify(this.state.gamestate, null, 2)}
-        </pre>
+        </pre> */}
       </div>
     );
   }
@@ -217,11 +246,13 @@ class PokerTable extends React.Component {
 class LoginForm extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { username: this.props.username, pass: this.props.password, tablename: this.props.tablename };
+    this.state = {
+      username: this.props.username, pass: this.props.password
+    };
     this.handleUsernameChange = this.handleUsernameChange.bind(this);
     this.handlePasswordChange = this.handlePasswordChange.bind(this);
-    this.handleTableNameChange = this.handleTableNameChange.bind(this);
     this.handleSubmit = this.handleSubmit.bind(this);
+    this.handleLogout = this.handleLogout.bind(this);
   }
 
   handleUsernameChange(event) {
@@ -230,35 +261,47 @@ class LoginForm extends React.Component {
   handlePasswordChange(event) {
     this.setState({pass: event.target.value});
   }
-  handleTableNameChange(event) {
-    this.setState({tablename: event.target.value});
-  }
 
   handleSubmit(event) {
     event.preventDefault();
-    console.log("Logging in user " + this.state.username + ", joining to table " + this.state.tablename);
-    this.props.onLogin(this.state.username, this.state.pass, this.state.tablename);
+    console.log("Logging in user " + this.state.username);
+    var credentials = `${this.state.username}:${this.state.pass}`
+    // check if password is ok
+    fetch(`http://${RestApiHost}/api/tables`,
+      {headers: {'X-Username': credentials}}
+    ).then(response => {
+      if (response.ok) {
+        this.props.onLogin(this.state.username, this.state.pass, credentials);
+      } else {
+        alert("Invalid password");
+      }
+    });
+  }
+
+  handleLogout(event) {
+    event.preventDefault();
+    console.log("Logging out user " + this.state.username);
+    this.props.onLogin("", "", "");
   }
 
   render() {
-    return (
-      <form onSubmit={this.handleSubmit}>
-        <label>
-          Player:
-          <input type="text" value={this.state.username} onChange={this.handleUsernameChange} />
-        </label>
-        <br/>
-        <label>
-          Password:
-          <input type="password" value={this.state.pass} onChange={this.handlePasswordChange} />
-        </label>
-        <label>
-          Table:
-          <input type="text" value={this.state.tablename} onChange={this.handleTableNameChange} />
-        </label>
-        <input type="submit" value="Enter" />
-      </form>
-    );
+    if (this.props.loggedIn) {
+      return <button onClick={this.handleLogout}>Log out {this.props.username}</button>
+    } else
+      return (
+        <form onSubmit={this.handleSubmit}>
+          <label>
+            Player:
+            <input type="text" value={this.state.username} onChange={this.handleUsernameChange} />
+          </label>
+          <br/>
+          <label>
+            Password:
+            <input type="password" value={this.state.pass} onChange={this.handlePasswordChange} />
+          </label>
+          <input type="submit" value="Login" />
+        </form>
+      );
   }
 }
 
@@ -271,16 +314,20 @@ class App extends React.Component {
       password: sessionStorage.getItem('friendspoker.password') || '',
       tablename: sessionStorage.getItem('friendspoker.tablename') || '',
       credentials: sessionStorage.getItem('friendspoker.credentials') || '',
+      loggedIn: sessionStorage.getItem('friendspoker.loggedIn') == "true"
     };
     // if (this.state.credentials && this.state.credentials.split(":")[1]) {
     //   this.state.password = this.state.credentials.split(":")[1];
     // }
     this.onLogin = this.onLogin.bind(this);
+    this.handleTableNameChange = this.handleTableNameChange.bind(this);
+    this.handleJoin = this.handleJoin.bind(this);
+
     // this.handleTableNameChange = this.handleTableNameChange.bind(this);
   }
 
   updateState(h) {
-    for (let key of ['username', 'password', 'tablename', 'credentials']) {
+    for (let key of ['username', 'password', 'tablename', 'credentials', "loggedIn"]) {
       if (h[key]) {
         sessionStorage.setItem(`friendspoker.${key}`, h[key]);
       }
@@ -288,19 +335,51 @@ class App extends React.Component {
     this.setState(h);
   }
 
-  onLogin(name, pass, tablename) {
+  onLogin(name, pass, credentials) {
     console.log(`onLogin(${name}, ${pass}) called`);
-    this.updateState({ "username": name, password: pass, tablename: tablename, "credentials": `${name}:${pass}` });
+    this.updateState({ username: name, password: pass, credentials: credentials, loggedIn: name.length > 0 });
+  }
+
+  handleTableNameChange(event) {
+    this.updateState({tablename: event.target.value});
+  }
+
+  async handleJoin(event) {
+    event.preventDefault();
+
+    // create if does not exist (may return error if exist)
+    await fetch(`http://${RestApiHost}/api/tables/${this.state.tablename}`, Object.assign({
+        method: "POST",
+      }, getCredsHeader(this.state.credentials))
+    );
+
+    fetch(`http://${RestApiHost}/api/tables/${this.state.tablename}/join`, Object.assign({
+        method: "POST",
+      }, getCredsHeader(this.state.credentials))
+    ).then(response => {
+      if (response.ok) {
+      } else {
+        alert("Could not join");
+      }
+    });
   }
 
   render() {
     return (
       <div>
-        <LoginForm username={this.state.username} password={this.state.password} tablename={this.state.tablename} onLogin={this.onLogin}/>
-
-        <div className="App">
-          <PokerTable credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}/>
-        </div>
+        <LoginForm loggedIn={this.state.loggedIn} username={this.state.username} password={this.state.password} tablename={this.state.tablename} onLogin={this.onLogin}/>
+        <form onSubmit={this.handleJoin}>
+          <label>
+            Table:
+            <input type="text" value={this.state.tablename} onChange={this.handleTableNameChange} />
+          </label>
+          <input type="submit" value="Join" />
+        </form>
+        {this.state.loggedIn &&
+          <div className="App">
+            <PokerTable credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}/>
+          </div>
+        }
       </div>
     );
   }

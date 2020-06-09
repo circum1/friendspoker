@@ -95,7 +95,14 @@ module EventMgr
       @@subscribers << obj
       objs << obj
     }
-    $log.debug("subscribe with id #{conn_id}")
+    $log.debug("Eventmgr.subscribe() channels: #{channel}, conn_id: #{conn_id}")
+
+    # Heuristic: here we re-send the events for the given table, as the client cannot
+    # do that without race condition (the /resend-events may be processed before this
+    # subscription is done asynchronously by EventMachine)
+    t = channel.map{ |c| /^table-([^:]+)/.match(c)&.[](1) }.compact[0]
+    Table.get_by_name(t)&.emit_events if t
+
     return proc {
       objs.each { |o| unsubscribe(o) }
     }
@@ -103,7 +110,7 @@ module EventMgr
 
   def self.unsubscribe(obj)
     if @@subscribers.delete(obj)
-      $log.debug("Subscriber from channel #{obj[:channel]} deleted")
+      $log.debug("Subscriber from channel #{obj[:channel]} with id #{obj[:conn_id]} deleted")
     else
       # $log.debug("Subscriber on channel #{obj[:channel]} could not be deleted")
     end
@@ -115,7 +122,7 @@ module EventMgr
     $log.debug("EventMgr#notify(#{event})")
 
     @@subscribers.select { |s| s[:channel] == event.channel }.map { |s|
-      $log.debug("EventMgr#notify() sending to subscriber")
+      $log.debug("EventMgr#notify() sending on channel #{s[:channel]} to subscriber with id #{s[:conn_id]}")
       s[:block].call(event)
     }
   end
@@ -395,6 +402,10 @@ class Player
 
 end
 
+#
+# Table
+#
+
 # One poker table.
 class Table
   @@tables = {}
@@ -484,13 +495,12 @@ class Table
     @players.concat(@pending_players)
     @pending_players = []
 
-    return false if @players.size < 2
+    raise InvalidActionError, "Not enough players" if @players.size < 2
+    raise InvalidActionError, "A game is ongoing" if @current_game && !@current_game.finished?
 
-    # TODO check if no ongoing game
     @current_game = Game.new(self, @button, @timeout)
     @button = (@button + 1) % players.size
     emit_events
-    return true
   end
 
   def add_player(player)
