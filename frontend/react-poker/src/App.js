@@ -152,11 +152,12 @@ class PokerTable extends React.Component {
       payload["raise_amount"] = this.state.raiseAmount;
     }
     // TODO block UI until ready
-    await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/action`, Object.assign({
+    var response = await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/action`, Object.assign({
         method: "POST",
         body: JSON.stringify(payload)
       }, this.getHeaders())
     );
+    if (!response.ok) alert(await response.text());
   }
 
   handleAmountChange(event) {
@@ -180,12 +181,15 @@ class PokerTable extends React.Component {
         <h3>Table {this.props.tablename}</h3>
         {this.state.gamestate.pigs.map((pig, i) => {
           return (
-            <div key={pig.name}>
-              <h4 className={pig.name==this.props.username ? "myself" : ""} key={pig.name}>Player {pig.name}{i==this.state.gamestate.button && " (button)"
-                }{i==this.state.gamestate.waiting_for && !this.state.gamestate.finished && " (in turn)"
+            <div key={pig.name} className={pig.inactive ? "player-inactive" : ""}>
+              <h4 className={pig.name == this.props.username ? "myself" : ""} key={pig.name}>
+                Player {pig.name}{i == this.state.gamestate.button && " (button)"
+                }{i == this.state.gamestate.waiting_for && !this.state.gamestate.finished && " (in turn)"
                 }{pig.folded && " (folded)"
+                }{pig.inactive ? " (not playing)" : pig.money == 0 ? " (all-in)" : ""
                 }{this.state.gamestate.winners.includes(pig.name) && " (winner)"
-                }</h4>
+                }
+              </h4>
               {this.state.playercards[pig.name] &&
                 <div>
                   Cards: <PokerCards cards={this.state.playercards[pig.name].cards}/> ({this.state.playercards[pig.name].rank})

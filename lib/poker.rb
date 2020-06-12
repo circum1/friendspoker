@@ -142,16 +142,21 @@ end
 class Lobby
 end
 
+# Game and Deal are synonyms (from dealing the cards until somebody wins)
 class PlayerInGame
   include JsonHelper
 
-  attr_reader :player, :last_action, :money_in_round, :cards, :folded
+  attr_reader :player, :money_in_round, :cards, :folded, :money_in_deal, :inactive
 
   # player is Table::PlayerAtTable object
   def initialize(player, game, cards, blind=0)
     @player = player
     @game = game
+    @money_in_deal = 0
+    @money_in_round = 0
     nextRound
+    @inactive = player.inactive?
+    return if @inactive
     # TODO check money
     add_to_pot(blind)
     @cards = cards
@@ -159,13 +164,17 @@ class PlayerInGame
   end
 
   def add_to_pot(amount)
+    raise "Internal error" if inactive
+    amount = @player.money if amount > @player.money
     @player.subtract_money(amount)
     @game.add_to_pot(amount)
     @money_in_round += amount
+    @money_in_deal += amount
   end
 
   # :bet should be translated to :raise by caller
   def action(what, max_bet, raise_amount=0)
+    raise InvalidActionError, "Player does not play" if @inactive
     $log.debug("PIG#action(#{what}, #{max_bet}, #{raise_amount})")
     raise InvalidActionError, "player #{player} already folded" if @folded
     # for call
@@ -175,7 +184,6 @@ class PlayerInGame
       raise InvalidActionError, "Invalid check, need to call #{amount} bucks" if amount > 0
     when :call, :raise
       amount += raise_amount if what == :raise
-      # TODO check if we have enough money
       add_to_pot(amount)
     when :fold
       @folded = true
@@ -191,7 +199,7 @@ class PlayerInGame
   # serializable state that is visible at the table from a player, in a form of hash
   # cards not included
   def get_state
-    @player.get_state.merge(attr2hash(:last_action, :money_in_round, :folded))
+    @player.get_state.merge(attr2hash(:money_in_round, :folded, :inactive))
   end
 
   # serializable state visible only for the given player (i.e., cards)
@@ -217,13 +225,16 @@ class Game
 
   attr_reader :deck
 
-  # index of player with dealing button
+  # index of player with dealing button in @all_pigs array
   attr_reader :button
 
   attr_reader :money_in_pot
 
-  # array of PlayerInGame objects
+  # array of PlayerInGame objects of active players
   attr_reader :pigs
+
+  # array of all players (including inactive, for state)
+  attr_reader :all_pigs
 
   # 0..3: preflop, flop, turn, river
   attr_reader :round
@@ -243,13 +254,13 @@ class Game
   # cards in players' hands not included
   def get_state
     h = attr2hash(:community_cards, :money_in_pot, :button, :round, :last_raiser, :waiting_for, :deadline)
-    h[:pigs] = pigs.map {|p| p.get_state}
+    h[:pigs] = @all_pigs.map {|p| p.get_state}
     h[:winners] = @winners
     h[:finished] = @finished
     return h
   end
 
-  # button is index in the table.players array
+  # button is index in the table.players array - MUST be an active player
   # timeout is the number of seconds allowed for action
   def initialize(table, button, timeout)
     @table = table
@@ -257,17 +268,27 @@ class Game
     @timeout = timeout
     @deck = Deck.new
     @money_in_pot = 0
-    @pigs = @table.players.map.with_index { |p, ind|
+
+    activePlayers = @table.players.select{ |p| !p.inactive? }
+    raise "Internal error: not enough active players" if activePlayers.size < 2
+    @activeButtonInd = activePlayers.find_index(@table.players[button])
+
+    @pigs = activePlayers.map.with_index { |p, ind|
       # TODO parameterize blind
       blind = case ind
-        when (button + 1) % @table.players.size then 10
-        when (button + 2) % @table.players.size then 20
+        when (@activeButtonInd + 1) % activePlayers.size then 10
+        when (@activeButtonInd + 2) % activePlayers.size then 20
         else 0
         end
       PlayerInGame.new(p, self, @deck.draw2, blind)
     }
+    # this is for get_state, add inactive players, too
+    @all_pigs = @table.players.map.with_index { |p, ind|
+      found = @pigs.find_index {|pp| pp.player == p }
+      found ? @pigs[found] : PlayerInGame.new(p, self, [], 0)
+    }
     @round = 0
-    @waiting_for = (button + 3) % @pigs.size
+    @waiting_for = (@activeButtonInd + 3) % @pigs.size
     @deadline = Time.now + @timeout
     # the player after big blind, even if she folds...
     @last_raiser = @waiting_for
@@ -331,21 +352,22 @@ class Game
     end
   end
 
-  def whos_next(still_playing)
+  def whos_next(still_playing, no_more_actions=false)
     raise "Internal error" if still_playing.size == 0
     if still_playing.size == 1
       @finished = true
       return
     end
 
+    canAct = ->(pig) {!pig.folded && pig.player.money > 0}
+
     loop {
       @waiting_for = (@waiting_for + 1) % @pigs.size
       break if @waiting_for == @last_raiser # end of round
-      break if !act_pig.folded
-      # TODO check for all-in
+      break if canAct.call(act_pig)
     }
 
-    if @waiting_for == @last_raiser
+    if @waiting_for == @last_raiser || no_more_actions
       @round += 1
       case @round
       when 1
@@ -359,8 +381,10 @@ class Game
         return
       end
       @pigs.each(&:nextRound)
-      @waiting_for = (@button + 1) % @pigs.size
+      @waiting_for = (@activeButtonInd + 1) % @pigs.size
       @last_raiser = @waiting_for
+      nomore = @pigs.select { |p| canAct.call(p) }.size <= 1
+      whos_next(still_playing, nomore) if !canAct.call(@pigs[@waiting_for]) || nomore
     end
     @deadline = Time.now + @timeout
   end
@@ -440,9 +464,14 @@ class Table
       @table = table
     end
 
+    # present, but does not participate in games
+    def inactive?
+      @money == 0
+    end
+
     # at bet
     def subtract_money(amount)
-      # TODO check <0
+      raise InvalidActionError, "Not enough money" if amount > @money
       @money -= amount
     end
 
@@ -450,9 +479,9 @@ class Table
       @money += amount
     end
 
-    def ==(other)
-      self.id == other.id
-    end
+    # def ==(other)
+    #   self.id == other.id
+    # end
 
     def get_state
       attr2hash(:name, :starting_money, :money)
@@ -495,9 +524,12 @@ class Table
     @players.concat(@pending_players)
     @pending_players = []
 
-    raise InvalidActionError, "Not enough players" if @players.size < 2
+    raise InvalidActionError, "Not enough players" if @players.select{ |p| !p.inactive? }.size < 2
     raise InvalidActionError, "A game is ongoing" if @current_game && !@current_game.finished?
 
+    while @players[@button].inactive?
+      @button += 1
+    end
     @current_game = Game.new(self, @button, @timeout)
     @button = (@button + 1) % players.size
     emit_events

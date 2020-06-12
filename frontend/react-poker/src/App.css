@@ -6,6 +6,10 @@
   color: red;
 }
 
+.player-inactive {
+  color: grey;
+}
+
 .myself {
   color: red;
 }
