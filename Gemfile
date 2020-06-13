@@ -11,6 +11,7 @@ gem 'dm-validations'
 gem 'dm-aggregates'
 gem 'dm-migrations'
 gem 'dm-paperclip'
+gem 'bcrypt', '3.1.12'
 
 group :development do
     gem 'guard'
