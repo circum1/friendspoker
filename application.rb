@@ -8,6 +8,9 @@ require 'json'
 
 require_relative 'lib/controllers/rest_endpoints.rb'
 
+# originally this was here:
+# require File.join(File.dirname(__FILE__), 'environment')
+
 class MyApp < Sinatra::Application
 
 #     #The helper json should use the default to_json method

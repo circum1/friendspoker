@@ -1,7 +1,8 @@
 import React from 'react';
 import './App.css';
 
-var RestApiHost = 'localhost:4567'
+var RestApiPrefix = 'http://localhost:4567'
+//var RestApiPrefix = ''
 
 function PokerCards(props) {
   const suitMap = { S: '♠', H: '♥', D: '♦', C: '♣' };
@@ -33,7 +34,7 @@ class PokerTable extends React.Component {
     this.handleActionButton = this.handleActionButton.bind(this);
     this.handleStartGame = this.handleStartGame.bind(this);
     this.handleAmountChange = this.handleAmountChange.bind(this);
-
+    this.handleRebuy = this.handleRebuy.bind(this);
   }
 
   getInitState() {
@@ -54,7 +55,7 @@ class PokerTable extends React.Component {
     console.log("pollEvents()");
 
     // console.log("pollEvents called, numberOfFetches: " + this.state.numberOfFetches);
-    fetch(`http://${RestApiHost}/api/poll-events?channel=table-${this.props.tablename},player-${this.props.username}:${this.props.tablename}&dontclose&id=${this.state.clientId}`,
+    fetch(`${RestApiPrefix}/api/poll-events?channel=table-${this.props.tablename},player-${this.props.username}:${this.props.tablename}&dontclose&id=${this.state.clientId}`,
       this.getHeaders()
     ).then(response => {
       // console.log("pollEvents succeeded, numberOfFetches: " + this.state.numberOfFetches);
@@ -115,7 +116,7 @@ class PokerTable extends React.Component {
     console.log("PokerTable.componentDidMount()");
     this.setState(this.getInitState());
     // cancel any /poll-events request currently running
-    await fetch(`http://${RestApiHost}/api/cancel-poll?id=${this.state.clientId}`, this.getHeaders() );
+    await fetch(`${RestApiPrefix}/api/cancel-poll?id=${this.state.clientId}`, this.getHeaders() );
     this.pollEvents();
   }
 
@@ -130,7 +131,7 @@ class PokerTable extends React.Component {
     // clear other players' old hand data
     this.setState(this.getInitState());
     try {
-      var response = await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/start`, Object.assign({
+      var response = await fetch(`${RestApiPrefix}/api/tables/${this.props.tablename}/start`, Object.assign({
           method: "POST",
         }, this.getHeaders())
       )
@@ -152,7 +153,7 @@ class PokerTable extends React.Component {
       payload["raise_amount"] = this.state.raiseAmount;
     }
     // TODO block UI until ready
-    var response = await fetch(`http://${RestApiHost}/api/tables/${this.props.tablename}/action`, Object.assign({
+    var response = await fetch(`${RestApiPrefix}/api/tables/${this.props.tablename}/action`, Object.assign({
         method: "POST",
         body: JSON.stringify(payload)
       }, this.getHeaders())
@@ -162,6 +163,13 @@ class PokerTable extends React.Component {
 
   handleAmountChange(event) {
     this.setState({raiseAmount: event.target.value});
+  }
+
+  handleRebuy(event) {
+    fetch(`${RestApiPrefix}/api/tables/${this.props.tablename}/rebuy`, Object.assign({
+        method: "POST"
+      }, this.getHeaders())
+    );
   }
 
   render() {
@@ -212,6 +220,11 @@ class PokerTable extends React.Component {
                       </button>
                     </span>;
                 })}
+                </div>
+              }
+              {this.state.gamestate.finished && this.props.username == pig.name && pig.money == 0 &&
+                <div>
+                  <button onClick={this.handleRebuy} className="rebuyButton">Rebuy</button>
                 </div>
               }
               <div>
@@ -271,7 +284,7 @@ class LoginForm extends React.Component {
     console.log("Logging in user " + this.state.username);
     var credentials = `${this.state.username}:${this.state.pass}`
     // check if password is ok
-    fetch(`http://${RestApiHost}/api/tables`,
+    fetch(`${RestApiPrefix}/api/tables`,
       {headers: {'X-Username': credentials}}
     ).then(response => {
       if (response.ok) {
@@ -352,12 +365,12 @@ class App extends React.Component {
     event.preventDefault();
 
     // create if does not exist (may return error if exist)
-    await fetch(`http://${RestApiHost}/api/tables/${this.state.tablename}`, Object.assign({
+    await fetch(`${RestApiPrefix}/api/tables/${this.state.tablename}`, Object.assign({
         method: "POST",
       }, getCredsHeader(this.state.credentials))
     );
 
-    fetch(`http://${RestApiHost}/api/tables/${this.state.tablename}/join`, Object.assign({
+    fetch(`${RestApiPrefix}/api/tables/${this.state.tablename}/join`, Object.assign({
         method: "POST",
       }, getCredsHeader(this.state.credentials))
     ).then(response => {

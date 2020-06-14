@@ -262,7 +262,7 @@ class Game
 
   # button is index in the table.players array - MUST be an active player
   # timeout is the number of seconds allowed for action
-  def initialize(table, button, timeout)
+  def initialize(table, button, timeout, small_blind=10, big_blind=20)
     @table = table
     @button = button
     @timeout = timeout
@@ -276,8 +276,8 @@ class Game
     @pigs = activePlayers.map.with_index { |p, ind|
       # TODO parameterize blind
       blind = case ind
-        when (@activeButtonInd + 1) % activePlayers.size then 10
-        when (@activeButtonInd + 2) % activePlayers.size then 20
+        when (@activeButtonInd + 1) % activePlayers.size then small_blind
+        when (@activeButtonInd + 2) % activePlayers.size then big_blind
         else 0
         end
       PlayerInGame.new(p, self, @deck.draw2, blind)
@@ -479,6 +479,11 @@ class Table
       @money += amount
     end
 
+    def rebuy(amount)
+      @money += amount
+      @starting_money += amount
+    end
+
     # def ==(other)
     #   self.id == other.id
     # end
@@ -506,14 +511,12 @@ class Table
 
     @players = [PlayerAtTable.new(owner, @starting_money, self)]
     @owner = @players[0]
+    @pending_players = []
 
     class << @players
-      def by_name(name)
-        self.find { |p| p.name == name }
-      end
+      def by_name(name) self.find { |p| p.name == name } end
     end
 
-    @pending_players = []
     @current_game = nil
     @button = 0
 
@@ -535,14 +538,25 @@ class Table
     emit_events
   end
 
+  def rebuy(player_name)
+    player = @players.by_name(player_name)
+    raise InvalidActionError, "Unkown player #{player_name}" if !player
+    if player.money < @starting_money / 10 && (!@current_game || @current_game.finished?)
+      player.rebuy(@starting_money)
+    else
+      raise InvalidActionError, "#{player_name} has too much money for rebuy" if !player
+    end
+    emit_events
+  end
+
   def add_player(player)
     # TODO what about pending_players?
-    if @players.by_name(player.name)
+    if @players.by_name(player.name) || @pending_players.find{ |p| p.name == player.name }
       $log.debug("Table#add_player(#{player.name}): already added")
       return @players.by_name(player.name)
     end
     pat = PlayerAtTable.new(player, @starting_money, self)
-    if !@current_game || @current.game.finished?
+    if !@current_game || @current_game.finished?
       @players << pat
     else
       @pending_players << pat

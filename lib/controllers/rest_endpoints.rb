@@ -134,6 +134,12 @@ class PokerApi < Sinatra::Application
     [204]
   end
 
+  post '/tables/:name/rebuy' do
+    table_context
+    @table.rebuy(@player.name)
+    [204]
+  end
+
   # # trigger sending out current state of the table
   # get '/tables/:name/resend-events' do
   #   table_context
