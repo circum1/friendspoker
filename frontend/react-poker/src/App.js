@@ -9,7 +9,7 @@ function PokerCards(props) {
   return (
     <span>
       {props.cards.map((c, i) =>
-        <span key={i} className={`suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`}</span>
+        <span key={i} className={`pokercard suit-${c[0]}`}>{`${suitMap[c[0]]}${c.substring(1)}`}</span>
       )}
     </span>
   );
@@ -35,6 +35,22 @@ class PokerTable extends React.Component {
     this.handleStartGame = this.handleStartGame.bind(this);
     this.handleAmountChange = this.handleAmountChange.bind(this);
     this.handleRebuy = this.handleRebuy.bind(this);
+    this.refreshTimerId = setInterval(() => {
+      this.setState((state) => {
+        // 0 means timeout not active
+        let secs = 0;
+        if (state.gamestate && !state.gamestate.finished && state.whosnext
+            && this.props.username == state.whosnext.player && state.deadline) {
+          secs = Math.round((state.deadline - new Date().getTime()) / 1000);
+          // -1 indicates imminent timeout
+          secs = (secs <= 0 ? -1 : secs);
+        }
+        if (state.remainingSecs != secs) {
+          this.setState({remainingSecs: secs});
+        }
+      return null;
+      });
+    }, 200);
   }
 
   getInitState() {
@@ -43,7 +59,9 @@ class PokerTable extends React.Component {
       playercards: {},
       whosnext: null,
       error: null,
-      raiseAmount: 20
+      raiseAmount: 20,
+      deadline: null,
+      remainingSecs: null
     };
   }
 
@@ -66,7 +84,8 @@ class PokerTable extends React.Component {
         var processEvent = resp => {
           console.log(`Event with type ${resp.evt.type} received`, resp);
           if (resp.evt.type == "GameStateEvent") {
-            this.setState({ "gamestate": resp.evt.event });
+            let deadline = new Date().getTime() + resp.evt.event.remaining_time * 1000;
+            this.setState({ "gamestate": resp.evt.event, "deadline": deadline, "remainingSecs": null });
           } else if (resp.evt.type == "WhosNextEvent") {
             this.setState({ "whosnext": resp.evt.event });
           } else if (resp.evt.type == "PlayerCardsEvent") {
@@ -207,19 +226,24 @@ class PokerTable extends React.Component {
               <div>Bet in this round: {pig.money_in_round}</div>
               {!this.state.gamestate.finished && this.state.whosnext && this.props.username == pig.name && this.props.username == this.state.whosnext.player &&
                 <div>
-                Actions:
-                {this.state.whosnext.actions.map((act) => {
-                  var needsraise = ['raise', 'bet'].includes(act);
-                    return <span key={act}>
-                      { needsraise &&
-                        <input type="text" pattern="[0-9]+" onInput={this.handleAmountChange} value={this.state.raiseAmount}/>
-                      }
-                      <button onClick={(e) => this.handleActionButton(e, act)} className="actionButton">{act
-                        }{needsraise && ` $${this.state.raiseAmount}`
-                        }{act=="call" && ` $${this.state.whosnext.call_amount}`}
-                      </button>
-                    </span>;
-                })}
+                  Actions:
+                  {this.state.whosnext.actions.map((act) => {
+                    var needsraise = ['raise', 'bet'].includes(act);
+                      return <span key={act}>
+                        { needsraise &&
+                          <input type="text" pattern="[0-9]+" onInput={this.handleAmountChange} value={this.state.raiseAmount}/>
+                        }
+                        <button onClick={(e) => this.handleActionButton(e, act)} className="actionButton">{act
+                          }{needsraise && ` $${this.state.raiseAmount}`
+                          }{act=="call" && ` $${this.state.whosnext.call_amount}`}
+                        </button>
+                      </span>;
+                  })}
+                  {this.state.remainingSecs &&
+                    <div>
+                      {this.state.remainingSecs < 0 ? "(timed out)" : `(${this.state.remainingSecs} secs)`}
+                    </div>
+                  }
                 </div>
               }
               {this.state.gamestate.finished && this.props.username == pig.name && pig.money == 0 &&

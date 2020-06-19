@@ -6,6 +6,10 @@
   color: red;
 }
 
+.pokercard {
+  font-size: 150%;
+}
+
 .player-inactive {
   color: grey;
 }

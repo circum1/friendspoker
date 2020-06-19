@@ -222,6 +222,7 @@ class Game
   include JsonHelper
 
   VALID_ACTIONS = [:check, :call, :bet, :raise, :fold]
+  TIMEOUT_MARGIN = 2
 
   attr_reader :deck
 
@@ -253,10 +254,11 @@ class Game
   # serializable, public state of the table (can be sent to clients)
   # cards in players' hands not included
   def get_state
-    h = attr2hash(:community_cards, :money_in_pot, :button, :round, :last_raiser, :waiting_for, :deadline)
+    h = attr2hash(:community_cards, :money_in_pot, :button, :round, :last_raiser, :waiting_for)
     h[:pigs] = @all_pigs.map {|p| p.get_state}
     h[:winners] = @winners
     h[:finished] = @finished
+    h[:remaining_time] = (@deadline - Time.now) - TIMEOUT_MARGIN
     return h
   end
 
@@ -289,12 +291,25 @@ class Game
     }
     @round = 0
     @waiting_for = (@activeButtonInd + 3) % @pigs.size
-    @deadline = Time.now + @timeout
+    setup_deadline
     # the player after big blind, even if she folds...
     @last_raiser = @waiting_for
     @community_cards = []
     @finished = false
     @winners = []
+  end
+
+  def setup_deadline
+    @deadline = Time.now + @timeout + TIMEOUT_MARGIN
+    # safety
+    current_player = act_pig.player
+    @deadline_timer = EventMachine::Timer.new(@timeout + TIMEOUT_MARGIN) do
+      raise "Internal error in deadline_timer" if current_player != act_pig.player
+      @deadline_timer = nil
+      maxbet = @pigs.map(&:money_in_round).max
+      action(maxbet <= act_pig.money_in_round ? :check : :fold, act_pig.player)
+      @table.emit_events
+    end
   end
 
   def add_to_pot(amount)
@@ -327,11 +342,13 @@ class Game
     raise InvalidActionError,
       "Action from player #{who} but it's #{act_pig.player}'s turn'" if act_pig.player != who
 
+    @deadline_timer.cancel if @deadline_timer
+
     what = :raise if what == :bet
 
     maxbet = @pigs.map(&:money_in_round).max
     act_pig.action(what, maxbet, raise_amount)
-    @last_raiser = @waiting_for if [:raise, :bet].include?(what)
+    @last_raiser = @waiting_for if what == :raise
 
     still_playing = @pigs.select { |p| p.folded == false }
     whos_next(still_playing)
@@ -344,8 +361,8 @@ class Game
         winnerhand = hands.max
         wins = still_playing.select.with_index { |p, i| hands[i] == winnerhand }.map(&:player)
       end
-      $log.debug("The winner(s): #{wins}")
       amount = @money_in_pot / wins.size
+      $log.debug("The winner(s): #{wins}, win: #{amount}")
       wins.each { |w| w.add_money(amount) }
       wins[0].add_money(@money_in_pot - amount * wins.size)
       @winners = wins.map(&:name)
@@ -384,9 +401,12 @@ class Game
       @waiting_for = (@activeButtonInd + 1) % @pigs.size
       @last_raiser = @waiting_for
       nomore = @pigs.select { |p| canAct.call(p) }.size <= 1
-      whos_next(still_playing, nomore) if !canAct.call(@pigs[@waiting_for]) || nomore
+      if !canAct.call(@pigs[@waiting_for]) || nomore
+        whos_next(still_playing, nomore)
+        return
+      end
     end
-    @deadline = Time.now + @timeout
+    setup_deadline
   end
 
   def finished?
@@ -507,7 +527,7 @@ class Table
 
     # TODO parameterize
     @starting_money = 1000
-    @timeout = 30
+    @timeout = 10
 
     @players = [PlayerAtTable.new(owner, @starting_money, self)]
     @owner = @players[0]
@@ -587,7 +607,7 @@ class Table
     # TODO csak a sajat eventet kell megkapni
     EventMgr.notify(WhosNextEvent.new(table_ch, current_game.get_next_actions))
     current_game.pigs.each { |pig|
-      ch = current_game.finished? ? table_ch : "player-#{pig.player.name}:#{name}"
+      ch = current_game.finished? && current_game.winners.include?(pig.player.name) ? table_ch : "player-#{pig.player.name}:#{name}"
       EventMgr.notify(PlayerCardsEvent.new(ch, pig.get_private_state))
     }
   end
