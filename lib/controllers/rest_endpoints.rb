@@ -73,7 +73,7 @@ class PokerApi < Sinatra::Application
     end
 
     channels << "player-#{@player.name}"
-    stream(:keep_open) do |out|
+      stream(:keep_open) do |out|
       # this code runs asynchronously
       unsub = EventMgr.subscribe(channels, "#{@player.name}:#{params[:id]}") { |evt|
         if evt
@@ -131,6 +131,12 @@ class PokerApi < Sinatra::Application
     @table = Table.get_by_name(params['name'])
     fail([404, "Table with name #{params['name']} not found!"]) if !@table
     @table.add_player(@player)
+    [204]
+  end
+
+  post '/tables/:name/leave' do
+    table_context
+    @table.remove_player(@player)
     [204]
   end
 

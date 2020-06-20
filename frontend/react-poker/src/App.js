@@ -58,6 +58,7 @@ class PokerTable extends React.Component {
       gamestate: null,
       playercards: {},
       whosnext: null,
+      playersAtTable: null,
       error: null,
       raiseAmount: 20,
       deadline: null,
@@ -88,6 +89,8 @@ class PokerTable extends React.Component {
             this.setState({ "gamestate": resp.evt.event, "deadline": deadline, "remainingSecs": null });
           } else if (resp.evt.type == "WhosNextEvent") {
             this.setState({ "whosnext": resp.evt.event });
+          } else if (resp.evt.type == "PlayersAtTableEvent") {
+            this.setState({ "playersAtTable": resp.evt.event });
           } else if (resp.evt.type == "PlayerCardsEvent") {
             this.setState((state) => {
               var newobj = Object.assign({}, state.playercards);
@@ -197,10 +200,25 @@ class PokerTable extends React.Component {
       return (<div>Please log in</div>);
     }
     if (!this.state.gamestate || !this.state.playercards) {
-      return (<div> <button onClick={this.handleStartGame}>New deal</button> </div>);
+      return (
+      <div>
+        {this.state.playersAtTable &&
+          <div>
+          Joined players:
+          <ul>
+            {this.state.playersAtTable &&
+              this.state.playersAtTable.map((p, i) => {
+                return <li>{p.name}</li>
+            })}
+          </ul>
+          </div>
+        }
+        <button onClick={this.handleStartGame}>Start game</button>
+      </div>
+      );
     }
     if (!this.state.gamestate.pigs.find(p => p.name == this.props.username)) {
-      return (<div>Not joined to the table</div>);
+      return (<div>Player {this.props.username} not joined to the table</div>);
     }
     const suitMap = { S: '♠', H: '♥', D: '♦', C: '♣' };
     return (
@@ -322,7 +340,7 @@ class LoginForm extends React.Component {
   handleLogout(event) {
     event.preventDefault();
     console.log("Logging out user " + this.state.username);
-    this.props.onLogin("", "", "");
+    this.props.onLogin(this.state.username, this.state.pass, "");
   }
 
   render() {
@@ -348,6 +366,7 @@ class LoginForm extends React.Component {
 
 class App extends React.Component {
   constructor(props) {
+    console.trace("App constructor");
     super(props);
     console.log("sessionStorage: ", sessionStorage);
     this.state = {
@@ -355,7 +374,9 @@ class App extends React.Component {
       password: sessionStorage.getItem('friendspoker.password') || '',
       tablename: sessionStorage.getItem('friendspoker.tablename') || '',
       credentials: sessionStorage.getItem('friendspoker.credentials') || '',
-      loggedIn: sessionStorage.getItem('friendspoker.loggedIn') == "true"
+      loggedIn: sessionStorage.getItem('friendspoker.loggedIn') == "true",
+      // this is for UI
+      joined: sessionStorage.getItem('friendspoker.joined') == "true",
     };
     // if (this.state.credentials && this.state.credentials.split(":")[1]) {
     //   this.state.password = this.state.credentials.split(":")[1];
@@ -364,12 +385,15 @@ class App extends React.Component {
     this.handleTableNameChange = this.handleTableNameChange.bind(this);
     this.handleJoin = this.handleJoin.bind(this);
 
+    if (this.state.loggedIn && this.state.joined) {
+      this.handleJoin(undefined);
+    }
     // this.handleTableNameChange = this.handleTableNameChange.bind(this);
   }
 
   updateState(h) {
-    for (let key of ['username', 'password', 'tablename', 'credentials', "loggedIn"]) {
-      if (h[key]) {
+    for (let key of ['username', 'password', 'tablename', 'credentials', "loggedIn", "joined"]) {
+      if (h.hasOwnProperty(key)) {
         sessionStorage.setItem(`friendspoker.${key}`, h[key]);
       }
     }
@@ -378,47 +402,54 @@ class App extends React.Component {
 
   onLogin(name, pass, credentials) {
     console.log(`onLogin(${name}, ${pass}) called`);
-    this.updateState({ username: name, password: pass, credentials: credentials, loggedIn: name.length > 0 });
+    this.updateState({ username: name, password: pass, credentials: credentials, loggedIn: credentials.length > 0 });
   }
 
   handleTableNameChange(event) {
-    this.updateState({tablename: event.target.value});
+    this.updateState({tablename: event.target.value, joined: false});
   }
 
   async handleJoin(event) {
-    event.preventDefault();
-
+    if (event) event.preventDefault();
+    console.trace("handleJoin called");
     // create if does not exist (may return error if exist)
     await fetch(`${RestApiPrefix}/api/tables/${this.state.tablename}`, Object.assign({
         method: "POST",
       }, getCredsHeader(this.state.credentials))
     );
 
-    fetch(`${RestApiPrefix}/api/tables/${this.state.tablename}/join`, Object.assign({
+    let response = await fetch(`${RestApiPrefix}/api/tables/${this.state.tablename}/join`, Object.assign({
         method: "POST",
       }, getCredsHeader(this.state.credentials))
-    ).then(response => {
-      if (response.ok) {
-      } else {
-        alert("Could not join");
-      }
-    });
+    )
+    if (response.ok) {
+      this.updateState({joined: true});
+    } else {
+      this.updateState({joined: false});
+      alert("Could not join");
+    }
   }
 
   render() {
+    console.log("App state:", this.state);
     return (
       <div>
         <LoginForm loggedIn={this.state.loggedIn} username={this.state.username} password={this.state.password} tablename={this.state.tablename} onLogin={this.onLogin}/>
-        <form onSubmit={this.handleJoin}>
-          <label>
-            Table:
-            <input type="text" value={this.state.tablename} onChange={this.handleTableNameChange} />
-          </label>
-          <input type="submit" value="Join" />
-        </form>
         {this.state.loggedIn &&
-          <div className="App">
-            <PokerTable credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}/>
+          <div>
+            {!this.state.joined ?
+              <form onSubmit={this.handleJoin}>
+                <label>
+                  Table:
+                  <input type="text" value={this.state.tablename} onChange={this.handleTableNameChange} />
+                </label>
+                <input type="submit" value="Join" />
+              </form>
+              :
+              <div className="App">
+                <PokerTable credentials={this.state.credentials} username={this.state.username} tablename={this.state.tablename}/>
+              </div>
+            }
           </div>
         }
       </div>

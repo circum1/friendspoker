@@ -49,6 +49,7 @@ end
 class TickEvent < PokerEvent; end
 class WhosNextEvent < PokerEvent; end
 class GameStateEvent < PokerEvent; end
+class PlayersAtTableEvent < PokerEvent; end
 class PlayerCardsEvent < PokerEvent; end
 class MessageEvent < PokerEvent; end
 
@@ -527,11 +528,12 @@ class Table
 
     # TODO parameterize
     @starting_money = 1000
-    @timeout = 10
+    @timeout = 25
 
     @players = [PlayerAtTable.new(owner, @starting_money, self)]
     @owner = @players[0]
     @pending_players = []
+    @delete_pending_players = []
 
     class << @players
       def by_name(name) self.find { |p| p.name == name } end
@@ -546,6 +548,8 @@ class Table
   def start_game
     @players.concat(@pending_players)
     @pending_players = []
+    @players.replace(@players - @delete_pending_players)
+    @delete_pending_players = []
 
     raise InvalidActionError, "Not enough players" if @players.select{ |p| !p.inactive? }.size < 2
     raise InvalidActionError, "A game is ongoing" if @current_game && !@current_game.finished?
@@ -569,8 +573,8 @@ class Table
     emit_events
   end
 
+  # player is Player object
   def add_player(player)
-    # TODO what about pending_players?
     if @players.by_name(player.name) || @pending_players.find{ |p| p.name == player.name }
       $log.debug("Table#add_player(#{player.name}): already added")
       return @players.by_name(player.name)
@@ -584,8 +588,16 @@ class Table
     return pat
   end
 
+  # player is PlayerAtTable object
   def remove_player(player)
-    # TODO, may be complicated if in game
+    return if @pending_players.delete(player)
+    if @players.by_name(player.name)
+      if !@current_game || @current_game.finished?
+        raise "Internal error" if !@players.delete(player)
+      else
+        @delete_pending_players << player
+      end
+    end
   end
 
   # what: Symbol
@@ -601,8 +613,11 @@ class Table
   end
 
   def emit_events
-    return if !current_game
     table_ch = "table-#{name}"
+    if !current_game
+      EventMgr.notify(PlayersAtTableEvent.new(table_ch, @players.map(&:get_state)))
+      return
+    end
     EventMgr.notify(GameStateEvent.new(table_ch, current_game.get_state))
     # TODO csak a sajat eventet kell megkapni
     EventMgr.notify(WhosNextEvent.new(table_ch, current_game.get_next_actions))
